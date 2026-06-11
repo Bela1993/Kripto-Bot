@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="10">
+    <title>Trading Bot Dashboard</title>
+    <style>
+        body { font-family: monospace; background: #0d1117; color: #c9d1d9; margin: 2rem; }
+        h1 { color: #58a6ff; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+        .green { color: #3fb950; }
+        .red { color: #f85149; }
+        .yellow { color: #d29922; }
+        .gray { color: #8b949e; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 0.5rem 1rem; border-bottom: 1px solid #21262d; text-align: left; }
+        th { color: #8b949e; font-size: 0.85rem; }
+        .badge-long    { background: #1a3b2e; color: #3fb950; padding: 2px 8px; border-radius: 4px; }
+        .badge-short   { background: #3b1a1a; color: #f85149; padding: 2px 8px; border-radius: 4px; }
+        .badge-none    { background: #21262d; color: #8b949e; padding: 2px 8px; border-radius: 4px; }
+        .badge-running { background: #1a3b2e; color: #3fb950; padding: 2px 8px; border-radius: 4px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin: 1rem 0; }
+        .stat-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; text-align: center; }
+        .stat-value { font-size: 1.5rem; font-weight: bold; margin: 0.5rem 0; }
+        .stat-label { color: #8b949e; font-size: 0.8rem; }
+        .pos-active { border-left: 3px solid #3fb950; }
+        .pos-inactive { border-left: 3px solid #30363d; }
+    </style>
+</head>
+<body>
+    <h1>🤖 Trading Bot Dashboard
+        <span class="badge-running" style="font-size:0.8rem; vertical-align: middle;">● LIVE</span>
+        <small style="color:#8b949e; font-size:0.7rem;">Utolsó webhook: {{ status.last_webhook or 'Még nem érkezett' }}</small>
+    </h1>
+    <small style="color:#8b949e">Automatikus frissítés 10 másodpercenként</small>
+
+    <div class="stats-grid">
+        <div class="stat-box">
+            <div class="stat-label">Napi PnL</div>
+            <div class="stat-value {{ 'green' if status.daily_pnl > 0 else 'red' if status.daily_pnl < 0 else 'gray' }}">
+                {{ "+%.2f"|format(status.daily_pnl) if status.daily_pnl > 0 else "%.2f"|format(status.daily_pnl) }} USDT
+            </div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Összes PnL</div>
+            <div class="stat-value {{ 'green' if status.total_pnl > 0 else 'red' if status.total_pnl < 0 else 'gray' }}">
+                {{ "+%.2f"|format(status.total_pnl) if status.total_pnl > 0 else "%.2f"|format(status.total_pnl) }} USDT
+            </div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Win Rate</div>
+            <div class="stat-value {{ 'green' if status.win_rate >= 55 else 'yellow' if status.win_rate >= 45 else 'red' }}">
+                {{ status.win_rate }}%
+            </div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Összes Trade</div>
+            <div class="stat-value" style="color:#58a6ff">{{ status.total_trades }}</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>💰 Egyenleg</h2>
+        <table>
+            <tr><th>USDT Egyenleg</th><td><strong>{{ "%.2f"|format(status.balance) }} USDT</strong></td></tr>
+            <tr><th>Bot állapot</th><td><span class="badge-running">● Fut</span></td></tr>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>📊 Pozíciók – 5 Coin</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Symbol</th>
+                    <th>Irány</th>
+                    <th>Valós ár</th>
+                    <th>Belépési ár</th>
+                    <th>Trailing SL</th>
+                    <th>Fázis</th>
+                    <th>Gyertya</th>
+                    <th>Nem real. PnL</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for p in status.positions %}
+            <tr class="{{ 'pos-active' if p.active else 'pos-inactive' }}">
+                <td><strong>{{ p.symbol }}</strong></td>
+                <td>
+                    {% if p.side == 'long' %}<span class="badge-long">LONG</span>
+                    {% elif p.side == 'short' %}<span class="badge-short">SHORT</span>
+                    {% else %}<span class="badge-none">NINCS</span>{% endif %}
+                </td>
+                <td>{{ "%.4f"|format(p.current_price) }}</td>
+                <td>{% if p.active %}{{ "%.4f"|format(p.entry) }}{% else %}<span class="gray">–</span>{% endif %}</td>
+                <td>{% if p.active %}{{ "%.4f"|format(p.trail_sl) }}{% else %}<span class="gray">–</span>{% endif %}</td>
+                <td>{% if p.active %}{{ p.phase }}{% else %}<span class="gray">–</span>{% endif %}</td>
+                <td>{% if p.active %}{{ p.candles }} / 8{% else %}<span class="gray">–</span>{% endif %}</td>
+                <td>
+                    {% if p.active %}
+                        {% if p.unrealized > 0 %}<span class="green">+{{ "%.2f"|format(p.unrealized) }} USDT</span>
+                        {% else %}<span class="red">{{ "%.2f"|format(p.unrealized) }} USDT</span>{% endif %}
+                    {% else %}<span class="gray">–</span>{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>📜 Trade előzmények (utolsó 50)</h2>
+        {% if trades %}
+        <table>
+            <thead>
+                <tr><th>Idő</th><th>Symbol</th><th>Irány</th><th>Belépés</th><th>Kilépés</th><th>Mennyiség</th><th>PnL</th><th>Ok</th></tr>
+            </thead>
+            <tbody>
+            {% for t in trades %}
+            <tr>
+                <td>{{ t.timestamp[:19] }}</td>
+                <td>{{ t.symbol if t.symbol is defined else 'BTCUSDT' }}</td>
+                <td>{% if t.side == 'long' %}<span class="badge-long">LONG</span>{% else %}<span class="badge-short">SHORT</span>{% endif %}</td>
+                <td>{{ "%.4f"|format(t.entry_price) }}</td>
+                <td>{{ "%.4f"|format(t.exit_price) }}</td>
+                <td>{{ t.quantity }}</td>
+                <td class="{{ 'green' if t.pnl > 0 else 'red' }}">{{ "+%.2f"|format(t.pnl) if t.pnl > 0 else "%.2f"|format(t.pnl) }} USDT</td>
+                <td>{{ t.reason }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}<p style="color:#8b949e">Még nincs lezárt trade.</p>{% endif %}
+    </div>
+</body>
+</html>
