@@ -1,1 +1,370 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="10">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #090c10;
+            color: #c9d1d9;
+            min-height: 100vh;
+        }
+
+        /* ── Header ── */
+        .header {
+            background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+            border-bottom: 1px solid #21262d;
+            padding: 1.2rem 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .header-left { display: flex; align-items: center; gap: 1rem; }
+        .logo { font-size: 1.5rem; font-weight: 700; color: #58a6ff; letter-spacing: -0.5px; }
+        .live-badge {
+            background: #1a3b2e;
+            color: #3fb950;
+            border: 1px solid #2ea043;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
+        .header-right { color: #8b949e; font-size: 0.8rem; }
+
+        /* ── Layout ── */
+        .main { padding: 1.5rem 2rem; max-width: 1400px; margin: 0 auto; }
+
+        /* ── Stats Grid ── */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .stat-card {
+            background: #0d1117;
+            border: 1px solid #21262d;
+            border-radius: 12px;
+            padding: 1.2rem 1.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+        }
+        .stat-card.blue::before   { background: linear-gradient(90deg, #1f6feb, #58a6ff); }
+        .stat-card.green::before  { background: linear-gradient(90deg, #1a7f37, #3fb950); }
+        .stat-card.yellow::before { background: linear-gradient(90deg, #9e6a03, #d29922); }
+        .stat-card.purple::before { background: linear-gradient(90deg, #6e40c9, #a5a0ff); }
+        .stat-label { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.5rem; }
+        .stat-value { font-size: 1.8rem; font-weight: 700; line-height: 1; }
+        .stat-unit  { font-size: 0.8rem; color: #8b949e; margin-top: 0.3rem; }
+
+        .green  { color: #3fb950; }
+        .red    { color: #f85149; }
+        .yellow { color: #d29922; }
+        .gray   { color: #8b949e; }
+        .blue   { color: #58a6ff; }
+
+        /* ── Section ── */
+        .section {
+            background: #0d1117;
+            border: 1px solid #21262d;
+            border-radius: 12px;
+            overflow: hidden;
+            margin-bottom: 1.5rem;
+        }
+        .section-header {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #21262d;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: #e6edf3;
+        }
+        .section-header .icon { font-size: 1rem; }
+
+        /* ── Table ── */
+        table { width: 100%; border-collapse: collapse; }
+        th {
+            padding: 0.7rem 1.2rem;
+            text-align: left;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #8b949e;
+            background: #0d1117;
+            border-bottom: 1px solid #21262d;
+            font-weight: 500;
+        }
+        td {
+            padding: 0.85rem 1.2rem;
+            border-bottom: 1px solid #161b22;
+            font-size: 0.88rem;
+        }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background: #161b22; }
+
+        /* ── Badges ── */
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+        .badge-long    { background: #0d2818; color: #3fb950; border: 1px solid #1a7f37; }
+        .badge-short   { background: #2d0f0f; color: #f85149; border: 1px solid #8b2020; }
+        .badge-v22     { background: #0d1f3c; color: #58a6ff; border: 1px solid #1f6feb; }
+        .badge-ct      { background: #1a1a3c; color: #a5a0ff; border: 1px solid #6e40c9; }
+        .badge-wr      { background: #1a2d1a; color: #56d364; border: 1px solid #2ea043; }
+        .badge-bm      { background: #2d1f0a; color: #d29922; border: 1px solid #9e6a03; }
+
+        /* ── Phase indicator ── */
+        .phase-dots { display: flex; gap: 4px; align-items: center; }
+        .dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #21262d;
+        }
+        .dot.active { background: #3fb950; }
+        .dot.trailing { background: #58a6ff; }
+
+        /* ── PnL bar ── */
+        .pnl-pos { color: #3fb950; font-weight: 600; }
+        .pnl-neg { color: #f85149; font-weight: 600; }
+
+        /* ── Empty state ── */
+        .empty-state {
+            padding: 3rem;
+            text-align: center;
+            color: #8b949e;
+        }
+        .empty-state .big { font-size: 2.5rem; margin-bottom: 0.5rem; }
+        .empty-state p { font-size: 0.9rem; }
+
+        /* ── History table ── */
+        .pnl-cell { font-weight: 600; }
+        .reason-chip {
+            background: #161b22;
+            color: #8b949e;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+        }
+
+        /* ── Responsive ── */
+        @media (max-width: 900px) {
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            .main { padding: 1rem; }
+            .header { padding: 1rem; }
+            th, td { padding: 0.6rem 0.8rem; font-size: 0.8rem; }
+        }
+        @media (max-width: 500px) {
+            .stats-grid { grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+            .stat-value { font-size: 1.4rem; }
+            .hide-mobile { display: none; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div class="header-left">
+        <div class="logo">⚡ KriptoBot</div>
+        <span class="live-badge">● LIVE</span>
+    </div>
+    <div class="header-right">
+        Frissítés: 10mp &nbsp;|&nbsp; Utolsó signal: {{ status.last_webhook or '–' }}
+    </div>
+</div>
+
+<div class="main">
+
+    <!-- Stats -->
+    <div class="stats-grid">
+        <div class="stat-card blue">
+            <div class="stat-label">Egyenleg</div>
+            <div class="stat-value blue">{{ "%.2f"|format(status.balance) }}</div>
+            <div class="stat-unit">USDT</div>
+        </div>
+        <div class="stat-card {{ 'green' if status.daily_pnl >= 0 else 'red' }}">
+            <div class="stat-label">Mai PnL</div>
+            <div class="stat-value {{ 'green' if status.daily_pnl >= 0 else 'red' }}">
+                {{ "+%.2f"|format(status.daily_pnl) if status.daily_pnl >= 0 else "%.2f"|format(status.daily_pnl) }}
+            </div>
+            <div class="stat-unit">USDT</div>
+        </div>
+        <div class="stat-card {{ 'green' if status.total_pnl >= 0 else 'red' }}">
+            <div class="stat-label">Összes PnL</div>
+            <div class="stat-value {{ 'green' if status.total_pnl >= 0 else 'red' }}">
+                {{ "+%.2f"|format(status.total_pnl) if status.total_pnl >= 0 else "%.2f"|format(status.total_pnl) }}
+            </div>
+            <div class="stat-unit">USDT</div>
+        </div>
+        <div class="stat-card {{ 'green' if status.win_rate >= 55 else 'yellow' if status.win_rate >= 45 else 'red' }}">
+            <div class="stat-label">Win Rate</div>
+            <div class="stat-value {{ 'green' if status.win_rate >= 55 else 'yellow' if status.win_rate >= 45 else 'red' }}">
+                {{ status.win_rate }}%
+            </div>
+            <div class="stat-unit">{{ status.total_trades }} trade</div>
+        </div>
+    </div>
+
+    <!-- Aktív pozíciók -->
+    <div class="section">
+        <div class="section-header">
+            <span class="icon">📈</span>
+            Nyitott pozíciók
+            {% set active_count = status.positions | selectattr('active') | list | length %}
+            <span style="background:#21262d; color:#8b949e; padding:2px 8px; border-radius:10px; font-size:0.75rem; margin-left:0.3rem;">
+                {{ active_count }}
+            </span>
+        </div>
+        {% set active_positions = status.positions | selectattr('active') | list %}
+        {% if active_positions %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Symbol</th>
+                    <th>Irány</th>
+                    <th>Stratégia</th>
+                    <th>Belépési ár</th>
+                    <th>Valós ár</th>
+                    <th>Trailing SL</th>
+                    <th>Fázis</th>
+                    <th class="hide-mobile">Gyertya</th>
+                    <th>Nem real. PnL</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for p in active_positions %}
+            <tr>
+                <td><strong>{{ p.symbol }}</strong></td>
+                <td>
+                    {% if p.side == 'long' %}
+                        <span class="badge badge-long">▲ LONG</span>
+                    {% else %}
+                        <span class="badge badge-short">▼ SHORT</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if p.strategy == 'v22' %}
+                        <span class="badge badge-v22">V22</span>
+                    {% elif p.strategy == 'ct' %}
+                        <span class="badge badge-ct">CT-B</span>
+                    {% elif p.strategy == 'wr' %}
+                        <span class="badge badge-wr">WR</span>
+                    {% elif p.strategy == 'bm' %}
+                        <span class="badge badge-bm">BigMove</span>
+                    {% else %}
+                        <span class="badge" style="background:#21262d;color:#8b949e;">{{ p.strategy }}</span>
+                    {% endif %}
+                </td>
+                <td>{{ "%.2f"|format(p.entry) }}</td>
+                <td>{{ "%.2f"|format(p.current_price) }}</td>
+                <td>{{ "%.2f"|format(p.trail_sl) }}</td>
+                <td>
+                    <div class="phase-dots">
+                        <div class="dot {{ 'trailing' if p.phase == 2 else 'active' }}"></div>
+                        <div class="dot {{ 'trailing' if p.phase == 2 else '' }}"></div>
+                        <span style="color:#8b949e; font-size:0.75rem; margin-left:4px;">
+                            {{ 'Trailing' if p.phase == 2 else 'Nyitott' }}
+                        </span>
+                    </div>
+                </td>
+                <td class="hide-mobile">
+                    <span style="color:#8b949e">{{ p.candles }} / 12</span>
+                </td>
+                <td>
+                    {% if p.unrealized > 0 %}
+                        <span class="pnl-pos">+{{ "%.2f"|format(p.unrealized) }} USDT</span>
+                    {% elif p.unrealized < 0 %}
+                        <span class="pnl-neg">{{ "%.2f"|format(p.unrealized) }} USDT</span>
+                    {% else %}
+                        <span class="gray">0.00 USDT</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <div class="big">😴</div>
+            <p>Nincs nyitott pozíció</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Trade előzmények -->
+    <div class="section">
+        <div class="section-header">
+            <span class="icon">📜</span>
+            Trade előzmények
+            <span style="background:#21262d; color:#8b949e; padding:2px 8px; border-radius:10px; font-size:0.75rem; margin-left:0.3rem;">
+                utolsó 50
+            </span>
+        </div>
+        {% if trades %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Idő</th>
+                    <th>Symbol</th>
+                    <th>Irány</th>
+                    <th class="hide-mobile">Belépés</th>
+                    <th class="hide-mobile">Kilépés</th>
+                    <th>PnL</th>
+                    <th class="hide-mobile">Ok</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for t in trades %}
+            <tr>
+                <td style="color:#8b949e; font-size:0.8rem;">{{ t.timestamp[:16] }}</td>
+                <td><strong>{{ t.symbol if t.symbol is defined else 'BTCUSDT' }}</strong></td>
+                <td>
+                    {% if t.side == 'long' %}
+                        <span class="badge badge-long">▲ L</span>
+                    {% else %}
+                        <span class="badge badge-short">▼ S</span>
+                    {% endif %}
+                </td>
+                <td class="hide-mobile" style="color:#8b949e;">{{ "%.2f"|format(t.entry_price) }}</td>
+                <td class="hide-mobile" style="color:#8b949e;">{{ "%.2f"|format(t.exit_price) }}</td>
+                <td class="pnl-cell {{ 'pnl-pos' if t.pnl > 0 else 'pnl-neg' }}">
+                    {{ "+%.2f"|format(t.pnl) if t.pnl > 0 else "%.2f"|format(t.pnl) }} USDT
+                </td>
+                <td class="hide-mobile"><span class="reason-chip">{{ t.reason }}</span></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <div class="big">📭</div>
+            <p>Még nincs lezárt trade</p>
+        </div>
+        {% endif %}
+    </div>
+
+</div>
+</body>
+</html>
 
