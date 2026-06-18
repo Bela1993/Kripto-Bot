@@ -2,7 +2,7 @@ import sqlite3
 import os
 from datetime import datetime, timezone
 
-DB_PATH = os.getenv("DB_PATH", "trades.db")
+DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "trades.db"))
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
