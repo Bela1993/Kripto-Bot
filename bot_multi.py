@@ -330,9 +330,9 @@ def webhook():
         close_position(symbol, "Manualis zaras")
         return jsonify({'status': 'ok'})
 
-    if signal in ('bounce_long',):
+    if signal in ('bounce_long', 'wr_long', 'bm_long', 'v22_long', 'ct_long'):
         signal = 'long'
-    if signal in ('bounce_short',):
+    if signal in ('bounce_short', 'wr_short', 'bm_short', 'v22_short', 'ct_short'):
         signal = 'short'
 
     price = get_price(symbol)
