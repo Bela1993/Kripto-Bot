@@ -63,7 +63,9 @@ def get_balance():
     try:
         for b in client.futures_account_balance():
             if b['asset'] == 'USDT':
-                return float(b['balance'])
+                wallet = float(b['balance'])
+                unpnl  = float(b.get('crossUnPnl', 0))
+                return round(wallet + unpnl, 2)
     except Exception as e:
         log.error(f"Egyenleg hiba: {e}")
     return 0.0
@@ -301,7 +303,7 @@ def update_trailing(symbol):
 # ── Webhook ───────────────────────────────────────────────────
 
 last_webhook = {'time': None}
-app = Flask(__name__)
+app = Flask(__name__, template_folder='.')
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
