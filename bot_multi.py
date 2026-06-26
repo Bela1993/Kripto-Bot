@@ -1,12 +1,11 @@
-BREAKEVEN_TRIGGER = 0.003
+BREAKEVEN_TRIGGER = 0.005
 import os
 import time
 import logging
 import math
 import threading
 import json
-from binance.client import Client
-from binance.enums import *
+import ccxt
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import db
@@ -23,28 +22,37 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 load_dotenv()
-API_KEY        = os.getenv('BINANCE_API_KEY')
-API_SECRET     = os.getenv('BINANCE_API_SECRET')
-TESTNET        = os.getenv('TESTNET', 'true').lower() == 'true'
+API_KEY        = os.getenv('OKX_API_KEY')
+API_SECRET     = os.getenv('OKX_API_SECRET')
+API_PASSPHRASE = os.getenv('OKX_PASSPHRASE')
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
 
-SYMBOLS = ['BTCUSDT', 'SOLUSDT', 'XRPUSDT', 'AVAXUSDT', 'SUIUSDT']
+SYMBOLS = ['BTC/USDC:USDC']
+STRATEGIES = ['v22', 'ct', 'wr', 'bm']
+SIGNAL_MAP = {
+    'bm_long': 'bm',
+    'bm_short': 'bm',
+    'long':    'v22', 'short':    'v22',
+    'ct_long': 'ct',  'ct_short': 'ct',
+    'wr_long': 'wr',  'wr_short': 'wr',
+    'bounce_long': 'v22', 'bounce_short': 'v22',
+}
 LEVERAGE       = 10
-RISK_PCT       = 0.02
-TRAIL_PHASE1   = 0.005
-TRAIL_PHASE2   = 0.002
+RISK_PCT       = 0.05
+TRAIL_PHASE1   = 0.003
+TRAIL_PHASE2   = 0.003
 PHASE2_TRIGGER = 0.005
-MAX_CANDLES    = 8
+MAX_CANDLES    = 12
 CANDLE_SEC     = 15 * 60
 
-if TESTNET:
-    client       = Client(API_KEY, API_SECRET, testnet=True)
-    price_client = Client('', '')
-    log.info("TESTNET modban fut! (valos arakkal)")
-else:
-    client       = Client(API_KEY, API_SECRET)
-    price_client = client
-    log.info("ELES modban fut!")
+client = ccxt.okx({
+    'apiKey': API_KEY,
+    'secret': API_SECRET,
+    'password': API_PASSPHRASE,
+    'options': {'defaultType': 'swap'},
+})
+price_client = client
+log.info("ELES modban fut! (OKX)")
 
 def _empty_position():
     return {
@@ -54,24 +62,24 @@ def _empty_position():
         'candles': 0, 'tp': None
     }
 
-positions = {sym: _empty_position() for sym in SYMBOLS}
-locks     = {sym: threading.Lock() for sym in SYMBOLS}
+positions = {sym: {s: _empty_position() for s in STRATEGIES} for sym in SYMBOLS}
+locks     = {sym: {s: threading.Lock() for s in STRATEGIES} for sym in SYMBOLS}
 
 # ── Segédfüggvények ───────────────────────────────────────────
 
 def get_balance():
     try:
-        for b in client.futures_account_balance():
-            if b['asset'] == 'USDT':
-                return float(b['balance'])
+        balance = client.fetch_balance(params={'type': 'swap'})
+        usdc = balance.get('USDC', {}).get('free', 0) or 0
+        return float(usdc)
     except Exception as e:
         log.error(f"Egyenleg hiba: {e}")
     return 0.0
 
 def get_price(symbol):
     try:
-        ticker = price_client.futures_symbol_ticker(symbol=symbol)
-        return float(ticker['price'])
+        ticker = price_client.fetch_ticker(symbol)
+        return float(ticker['last'])
     except Exception as e:
         log.error(f"Ar hiba [{symbol}]: {e}")
     return 0.0
@@ -79,7 +87,7 @@ def get_price(symbol):
 def set_leverage_all():
     for sym in SYMBOLS:
         try:
-            client.futures_change_leverage(symbol=sym, leverage=LEVERAGE)
+            client.set_leverage(LEVERAGE, sym, params={'mgnMode': 'cross'})
             log.info(f"Leverage {LEVERAGE}x beallitva: {sym}")
         except Exception as e:
             log.error(f"Leverage hiba [{sym}]: {e}")
@@ -90,17 +98,27 @@ def get_lot_size(symbol):
     if symbol in _lot_size_cache:
         return _lot_size_cache[symbol]
     try:
-        info = client.futures_exchange_info()
-        for s in info['symbols']:
-            if s['symbol'] == symbol:
-                for f in s['filters']:
-                    if f['filterType'] == 'LOT_SIZE':
-                        step = float(f['stepSize'])
-                        _lot_size_cache[symbol] = step
-                        return step
+        market = client.market(symbol)
+        step = market['precision']['amount']
+        _lot_size_cache[symbol] = step
+        return step
     except Exception as e:
         log.error(f"LOT_SIZE hiba [{symbol}]: {e}")
     return 0.001
+
+_min_amount_cache = {}
+
+def get_min_amount(symbol):
+    if symbol in _min_amount_cache:
+        return _min_amount_cache[symbol]
+    try:
+        market = client.market(symbol)
+        min_amt = (market.get('limits', {}).get('amount', {}) or {}).get('min') or 0.0
+        _min_amount_cache[symbol] = min_amt
+        return min_amt
+    except Exception as e:
+        log.error(f"MIN_AMOUNT hiba [{symbol}]: {e}")
+    return 0.0
 
 def round_to_lot_size(quantity, step_size):
     precision = max(0, round(-math.log10(step_size)))
@@ -137,19 +155,20 @@ def load_positions():
 
 # ── Pozíció nyitás / zárás ────────────────────────────────────
 
-def open_long(symbol, price, sl_price, tp_price=None):
+def open_long(symbol, strategy, price, sl_price, tp_price=None):
     try:
         balance  = get_balance()
         raw_qty  = calc_quantity(price, sl_price, balance)
-        step     = get_lot_size(symbol)
-        qty      = round_to_lot_size(raw_qty, step)
+        qty      = float(client.amount_to_precision(symbol, raw_qty))
+        min_qty  = get_min_amount(symbol)
+        if min_qty and qty < min_qty:
+            qty = min_qty
         if qty <= 0:
-            log.error(f"Hibas pozicio meret [{symbol}]!")
+            log.error(f"Hibas pozicio meret [{symbol}/{strategy}]!")
             return False
-        client.futures_create_order(symbol=symbol, side=SIDE_BUY,
-                                    type=ORDER_TYPE_MARKET, quantity=qty)
-        with locks[symbol]:
-            p = positions[symbol]
+        client.create_order(symbol, 'market', 'buy', qty, params={'tdMode': 'cross'})
+        with locks[symbol][strategy]:
+            p = positions[symbol][strategy]
             p['active']      = True
             p['side']        = 'long'
             p['entry_price'] = price
@@ -160,26 +179,27 @@ def open_long(symbol, price, sl_price, tp_price=None):
             p['open_time']   = time.time()
             p['candles']     = 0
             p['tp']          = tp_price
-        log.info(f"LONG nyitva [{symbol}]: {price} | Qty: {qty} | SL: {sl_price} | TP: {tp_price}")
+        log.info(f"LONG nyitva [{symbol}/{strategy}]: {price} | Qty: {qty} | SL: {sl_price} | TP: {tp_price}")
         save_positions()
         return True
     except Exception as e:
-        log.error(f"Long hiba [{symbol}]: {e}")
+        log.error(f"Long hiba [{symbol}/{strategy}]: {e}")
         return False
 
-def open_short(symbol, price, sl_price, tp_price=None):
+def open_short(symbol, strategy, price, sl_price, tp_price=None):
     try:
         balance  = get_balance()
         raw_qty  = calc_quantity(price, sl_price, balance)
-        step     = get_lot_size(symbol)
-        qty      = round_to_lot_size(raw_qty, step)
+        qty      = float(client.amount_to_precision(symbol, raw_qty))
+        min_qty  = get_min_amount(symbol)
+        if min_qty and qty < min_qty:
+            qty = min_qty
         if qty <= 0:
-            log.error(f"Hibas pozicio meret [{symbol}]!")
+            log.error(f"Hibas pozicio meret [{symbol}/{strategy}]!")
             return False
-        client.futures_create_order(symbol=symbol, side=SIDE_SELL,
-                                    type=ORDER_TYPE_MARKET, quantity=qty)
-        with locks[symbol]:
-            p = positions[symbol]
+        client.create_order(symbol, 'market', 'sell', qty, params={'tdMode': 'cross'})
+        with locks[symbol][strategy]:
+            p = positions[symbol][strategy]
             p['active']      = True
             p['side']        = 'short'
             p['entry_price'] = price
@@ -190,45 +210,45 @@ def open_short(symbol, price, sl_price, tp_price=None):
             p['open_time']   = time.time()
             p['candles']     = 0
             p['tp']          = tp_price
-        log.info(f"SHORT nyitva [{symbol}]: {price} | Qty: {qty} | SL: {sl_price} | TP: {tp_price}")
+        log.info(f"SHORT nyitva [{symbol}/{strategy}]: {price} | Qty: {qty} | SL: {sl_price} | TP: {tp_price}")
         save_positions()
         return True
     except Exception as e:
-        log.error(f"Short hiba [{symbol}]: {e}")
+        log.error(f"Short hiba [{symbol}/{strategy}]: {e}")
         return False
 
-def close_position(symbol, reason=""):
-    lock = locks[symbol]
+def close_position(symbol, strategy, reason=""):
+    lock = locks[symbol][strategy]
     with lock:
-        p = positions[symbol]
+        p = positions[symbol][strategy]
         if not p['active']:
             return
         p['active']   = False
-        side_close    = SIDE_SELL if p['side'] == 'long' else SIDE_BUY
         entry         = p['entry_price']
         qty           = p['quantity']
         side          = p['side']
     try:
-        client.futures_create_order(symbol=symbol, side=side_close,
-                                    type=ORDER_TYPE_MARKET, quantity=qty)
+        side_str = 'sell' if side == 'long' else 'buy'
+        client.create_order(symbol, 'market', side_str, qty,
+                             params={'tdMode': 'cross', 'reduceOnly': True})
     except Exception as e:
         log.error(f"Zaras API hiba [{symbol}]: {e}")
         with lock:
-            positions[symbol]['active'] = True
+            positions[symbol][strategy]['active'] = True
         return
     exit_price = get_price(symbol)
     pnl = (exit_price - entry) * qty if side == 'long' else (entry - exit_price) * qty
-    log.info(f"Pozicio zarva [{symbol}] ({reason}) | PnL: {pnl:.2f} USDT")
+    log.info(f"Pozicio zarva [{symbol}/{strategy}] ({reason}) | PnL: {pnl:.2f} USDC")
     db.log_trade(side, entry, exit_price, qty, round(pnl, 4), reason, symbol=symbol)
     with lock:
-        positions[symbol] = _empty_position()
+        positions[symbol][strategy] = _empty_position()
     save_positions()
 
 # ── Trailing stop loop ────────────────────────────────────────
 
-def update_trailing(symbol):
-    with locks[symbol]:
-        p = positions[symbol]
+def update_trailing(symbol, strategy):
+    with locks[symbol][strategy]:
+        p = positions[symbol][strategy]
         if not p['active']:
             return
         price_entry = p['entry_price']
@@ -239,21 +259,45 @@ def update_trailing(symbol):
     if price <= 0:
         return
 
-    with locks[symbol]:
-        elapsed             = time.time() - positions[symbol]['open_time']
-        positions[symbol]['candles'] = int(elapsed / CANDLE_SEC)
-        candles             = positions[symbol]['candles']
+    with locks[symbol][strategy]:
+        elapsed             = time.time() - positions[symbol][strategy]['open_time']
+        positions[symbol][strategy]['candles'] = int(elapsed / CANDLE_SEC)
+        candles             = positions[symbol][strategy]['candles']
 
     if candles >= MAX_CANDLES:
-        log.info(f"[{symbol}] {MAX_CANDLES} gyertya timeout - zaras")
-        close_position(symbol, f"{MAX_CANDLES} gyertya timeout")
-        return
+        p = positions[symbol][strategy]
+        price = get_price(symbol)
+        tp = p.get('tp')
+        entry = p.get('price_entry', price)
+        direction = p.get('direction', 'long')
+        near_tp = False
+        if tp and entry and tp != entry:
+            if direction == 'long':
+                progress = (price - entry) / (tp - entry) if tp > entry else 0
+            else:
+                progress = (entry - price) / (entry - tp) if entry > tp else 0
+            near_tp = progress >= 0.70
+        if near_tp:
+            log.info(f"[{symbol}/{strategy}] TP kozel ({progress*100:.0f}%) - trailing 0.5% aktivalva, timeout kihagyva")
+            with locks[symbol][strategy]:
+                if direction == 'long':
+                    new_trail = price * (1 - 0.005)
+                    if new_trail > p['trail_sl']:
+                        p['trail_sl'] = new_trail
+                else:
+                    new_trail = price * (1 + 0.005)
+                    if new_trail < p['trail_sl'] or p['trail_sl'] == 0:
+                        p['trail_sl'] = new_trail
+        else:
+            log.info(f"[{symbol}/{strategy}] {MAX_CANDLES} gyertya timeout - zaras")
+            close_position(symbol, strategy, f"{MAX_CANDLES} gyertya timeout")
+            return
 
     should_close  = False
     close_reason  = ""
 
-    with locks[symbol]:
-        p = positions[symbol]
+    with locks[symbol][strategy]:
+        p = positions[symbol][strategy]
         if side == 'long':
             profit_pct = (price - price_entry) / price_entry
             if profit_pct >= BREAKEVEN_TRIGGER and p['trail_sl'] < price_entry:
@@ -296,7 +340,7 @@ def update_trailing(symbol):
                 close_reason = "Trailing SL"
 
     if should_close:
-        close_position(symbol, close_reason)
+        close_position(symbol, strategy, close_reason)
 
 # ── Webhook ───────────────────────────────────────────────────
 
@@ -315,8 +359,8 @@ def webhook():
         return jsonify({'error': 'Hibas adat'}), 400
 
     raw_sym = data.get('symbol', 'BTCUSDT').upper().replace('/', '').replace('-', '')
-    # BTCUSDT / BTC/USDT / BTCPERP mind elfogadott
-    symbol = raw_sym if raw_sym in SYMBOLS else raw_sym + 'USDT'
+    base    = raw_sym.replace('USDT', '').replace('USDC', '')
+    symbol  = f"{base}/USDC:USDC"
     if symbol not in SYMBOLS:
         log.warning(f"Ismeretlen symbol: {symbol}")
         return jsonify({'error': f'Ismeretlen symbol: {symbol}'}), 400
@@ -325,46 +369,56 @@ def webhook():
     last_webhook['time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     if signal == 'close':
-        close_position(symbol, "Manualis zaras")
+        strat = data.get('strategy', None)
+        if strat and strat in STRATEGIES:
+            close_position(symbol, strat, "Manualis zaras")
+        else:
+            for s in STRATEGIES:
+                close_position(symbol, s, "Manualis zaras")
         return jsonify({'status': 'ok'})
 
-    if signal in ('bounce_long',):
-        signal = 'long'
-    if signal in ('bounce_short',):
-        signal = 'short'
+    strategy = SIGNAL_MAP.get(signal)
+    if not strategy:
+        log.warning(f"Ismeretlen signal: {signal}")
+        return jsonify({'error': f'Ismeretlen signal: {signal}'}), 400
+
+    is_long = signal in ('long', 'bounce_long', 'ct_long', 'wr_long', 'bm_long')
 
     price = get_price(symbol)
     if price <= 0:
         return jsonify({'error': 'Nem sikerult az ar lekerdezese'}), 500
 
-    with locks[symbol]:
-        pos_active = positions[symbol]['active']
-        pos_side   = positions[symbol]['side']
-        pos_entry  = positions[symbol]['entry_price']
+    with locks[symbol][strategy]:
+        pos_active = positions[symbol][strategy]['active']
+        pos_side   = positions[symbol][strategy]['side']
+        pos_entry  = positions[symbol][strategy]['entry_price']
 
-    if signal == 'long':
+    if is_long:
         if pos_active and pos_side == 'long':
             current_pnl = (price - pos_entry) / pos_entry
             if current_pnl > 0:
-                close_position(symbol, "Ujrapozicionajas")
-                open_long(symbol, price, price * (1 - TRAIL_PHASE1 * 2))
+                close_position(symbol, strategy, "Ujrapozicionajas")
+                open_long(symbol, strategy, price, price * (1 - TRAIL_PHASE1 * 2))
+            else:
+                log.info(f"LONG mar nyitva [{symbol}/{strategy}], kihagyva")
         elif not pos_active:
             sl = float(data.get('sl', price * (1 - TRAIL_PHASE1 * 2)))
             tp = float(data.get('tp', price * (1 + TRAIL_PHASE1 * 4)))
-            log.info(f"LONG jel [{symbol}] | SL: {sl:.4f} | TP: {tp:.4f}")
-            open_long(symbol, price, sl, tp)
-
-    elif signal == 'short':
+            log.info(f"LONG jel [{symbol}/{strategy}] | SL: {sl:.4f} | TP: {tp:.4f}")
+            open_long(symbol, strategy, price, sl, tp)
+    else:
         if pos_active and pos_side == 'short':
             current_pnl = (pos_entry - price) / pos_entry
             if current_pnl > 0:
-                close_position(symbol, "Ujrapozicionajas")
-                open_short(symbol, price, price * (1 + TRAIL_PHASE1 * 2))
+                close_position(symbol, strategy, "Ujrapozicionajas")
+                open_short(symbol, strategy, price, price * (1 + TRAIL_PHASE1 * 2))
+            else:
+                log.info(f"SHORT mar nyitva [{symbol}/{strategy}], kihagyva")
         elif not pos_active:
             sl = float(data.get('sl', price * (1 + TRAIL_PHASE1 * 2)))
             tp = float(data.get('tp', price * (1 - TRAIL_PHASE1 * 4)))
-            log.info(f"SHORT jel [{symbol}] | SL: {sl:.4f} | TP: {tp:.4f}")
-            open_short(symbol, price, sl, tp)
+            log.info(f"SHORT jel [{symbol}/{strategy}] | SL: {sl:.4f} | TP: {tp:.4f}")
+            open_short(symbol, strategy, price, sl, tp)
 
     return jsonify({'status': 'ok'}), 200
 
@@ -373,10 +427,12 @@ def status():
     result = {}
     for sym in SYMBOLS:
         price = get_price(sym)
-        with locks[sym]:
-            p = dict(positions[sym])
-        p['current_price'] = price
-        result[sym] = p
+        result[sym] = {}
+        for strat in STRATEGIES:
+            with locks[sym][strat]:
+                p = dict(positions[sym][strat])
+            p['current_price'] = price
+            result[sym][strat] = p
     result['balance'] = get_balance()
     return jsonify(result)
 
@@ -387,26 +443,28 @@ def dashboard():
     pos_list = []
     for sym in SYMBOLS:
         price = get_price(sym)
-        with locks[sym]:
-            p = dict(positions[sym])
-        if p['active']:
-            if p['side'] == 'long':
-                unrealized = (price - p['entry_price']) * p['quantity']
+        for strat in STRATEGIES:
+            with locks[sym][strat]:
+                p = dict(positions[sym][strat])
+            if p['active']:
+                if p['side'] == 'long':
+                    unrealized = (price - p['entry_price']) * p['quantity']
+                else:
+                    unrealized = (p['entry_price'] - price) * p['quantity']
             else:
-                unrealized = (p['entry_price'] - price) * p['quantity']
-        else:
-            unrealized = 0.0
-        pos_list.append({
-            'symbol':        sym,
-            'active':        p['active'],
-            'side':          p['side'],
-            'entry':         p['entry_price'],
-            'current_price': price,
-            'trail_sl':      p['trail_sl'],
-            'phase':         p['phase'],
-            'candles':       p['candles'],
-            'unrealized':    round(unrealized, 4),
-        })
+                unrealized = 0.0
+            pos_list.append({
+                'symbol':        sym,
+                'strategy':      strat,
+                'active':        p['active'],
+                'side':          p['side'],
+                'entry':         p['entry_price'],
+                'current_price': price,
+                'trail_sl':      p['trail_sl'],
+                'phase':         p['phase'],
+                'candles':       p['candles'],
+                'unrealized':    round(unrealized, 4),
+            })
     stats = db.get_stats()
     status_data = {
         'positions':    pos_list,
@@ -429,10 +487,11 @@ def monitor_loop():
     log.info("Bot elindult - 5 symbol")
     while True:
         for sym in SYMBOLS:
-            try:
-                update_trailing(sym)
-            except Exception as e:
-                log.error(f"Monitor hiba [{sym}]: {e}")
+            for strat in STRATEGIES:
+                try:
+                    update_trailing(sym, strat)
+                except Exception as e:
+                    log.error(f"Monitor hiba [{sym}/{strat}]: {e}")
         time.sleep(10)
 
 if __name__ == '__main__':
@@ -440,4 +499,4 @@ if __name__ == '__main__':
     monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
     monitor_thread.start()
     log.info("Webhook szerver indul - port 80")
-    app.run(host='0.0.0.0', port=80)
+    app.run(host='0.0.0.0', port=80, threaded=True)
