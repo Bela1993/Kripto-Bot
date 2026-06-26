@@ -6,9 +6,6 @@ import math
 import threading
 import json
 import ccxt
-import imaplib
-import email
-import re
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 import db
@@ -28,8 +25,6 @@ load_dotenv()
 API_KEY        = os.getenv('KRAKEN_API_KEY')
 API_SECRET     = os.getenv('KRAKEN_API_SECRET')
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
-GMAIL_EMAIL    = os.getenv('GMAIL_EMAIL')
-GMAIL_APP_PASSWORD = os.getenv('GMAIL_APP_PASSWORD')
 
 SYMBOLS = ['BTC/USD:USD']
 STRATEGIES = ['v22', 'ct', 'wr', 'bm']
@@ -441,48 +436,6 @@ def webhook():
     result, code = process_signal(data)
     return jsonify(result), code
 
-# ── Email alert figyeles (TradingView webhook helyett) ─────────
-
-def email_poll_loop():
-    if not GMAIL_EMAIL or not GMAIL_APP_PASSWORD:
-        log.info("Email figyeles kikapcsolva (nincs GMAIL_EMAIL/GMAIL_APP_PASSWORD)")
-        return
-    log.info("Email figyeles elindult (TradingView alertek)")
-    while True:
-        try:
-            imap = imaplib.IMAP4_SSL('imap.gmail.com')
-            imap.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
-            imap.select('INBOX')
-            _, msg_nums = imap.search(None, '(UNSEEN FROM "tradingview")')
-            for num in msg_nums[0].split():
-                _, msg_data = imap.fetch(num, '(RFC822)')
-                msg = email.message_from_bytes(msg_data[0][1])
-                body = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        if part.get_content_type() == 'text/plain':
-                            body += part.get_payload(decode=True).decode(errors='ignore')
-                else:
-                    payload = msg.get_payload(decode=True)
-                    if payload:
-                        body = payload.decode(errors='ignore')
-                match = re.search(r'\{[^{}]*\}', body)
-                if match:
-                    try:
-                        data = json.loads(match.group(0))
-                        log.info(f"Email jelzes: {data}")
-                        process_signal(data)
-                    except Exception as e:
-                        log.error(f"Email JSON parse hiba: {e}")
-                else:
-                    log.warning(f"Nem talalhato JSON az emailben: {body[:200]}")
-                imap.store(num, '+FLAGS', '\\Seen')
-            imap.close()
-            imap.logout()
-        except Exception as e:
-            log.error(f"Email lekerdezes hiba: {e}")
-        time.sleep(15)
-
 @app.route('/status')
 def status():
     result = {}
@@ -559,7 +512,5 @@ if __name__ == '__main__':
     db.init_db()
     monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
     monitor_thread.start()
-    email_thread = threading.Thread(target=email_poll_loop, daemon=True)
-    email_thread.start()
     log.info("Webhook szerver indul - port 80")
     app.run(host='0.0.0.0', port=80, threaded=True)
