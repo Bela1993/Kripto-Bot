@@ -22,12 +22,11 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 load_dotenv()
-API_KEY        = os.getenv('OKX_API_KEY')
-API_SECRET     = os.getenv('OKX_API_SECRET')
-API_PASSPHRASE = os.getenv('OKX_PASSPHRASE')
+API_KEY        = os.getenv('KRAKEN_API_KEY')
+API_SECRET     = os.getenv('KRAKEN_API_SECRET')
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
 
-SYMBOLS = ['BTC/USDC:USDC']
+SYMBOLS = ['BTC/USD:USD']
 STRATEGIES = ['v22', 'ct', 'wr', 'bm']
 SIGNAL_MAP = {
     'bm_long': 'bm',
@@ -45,14 +44,12 @@ PHASE2_TRIGGER = 0.005
 MAX_CANDLES    = 12
 CANDLE_SEC     = 15 * 60
 
-client = ccxt.okx({
+client = ccxt.krakenfutures({
     'apiKey': API_KEY,
     'secret': API_SECRET,
-    'password': API_PASSPHRASE,
-    'options': {'defaultType': 'swap'},
 })
 price_client = client
-log.info("ELES modban fut! (OKX)")
+log.info("ELES modban fut! (Kraken Futures)")
 
 def _empty_position():
     return {
@@ -69,7 +66,7 @@ locks     = {sym: {s: threading.Lock() for s in STRATEGIES} for sym in SYMBOLS}
 
 def get_balance():
     try:
-        balance = client.fetch_balance(params={'type': 'swap'})
+        balance = client.fetch_balance()
         usdc = balance.get('USDC', {}).get('free', 0) or 0
         return float(usdc)
     except Exception as e:
@@ -87,7 +84,7 @@ def get_price(symbol):
 def set_leverage_all():
     for sym in SYMBOLS:
         try:
-            client.set_leverage(LEVERAGE, sym, params={'mgnMode': 'cross'})
+            client.set_leverage(LEVERAGE, sym)
             log.info(f"Leverage {LEVERAGE}x beallitva: {sym}")
         except Exception as e:
             log.error(f"Leverage hiba [{sym}]: {e}")
@@ -119,6 +116,20 @@ def get_min_amount(symbol):
     except Exception as e:
         log.error(f"MIN_AMOUNT hiba [{symbol}]: {e}")
     return 0.0
+
+_contract_size_cache = {}
+
+def get_contract_size(symbol):
+    if symbol in _contract_size_cache:
+        return _contract_size_cache[symbol]
+    try:
+        market = client.market(symbol)
+        size = market.get('contractSize') or 1.0
+        _contract_size_cache[symbol] = size
+        return size
+    except Exception as e:
+        log.error(f"CONTRACT_SIZE hiba [{symbol}]: {e}")
+    return 1.0
 
 def round_to_lot_size(quantity, step_size):
     precision = max(0, round(-math.log10(step_size)))
@@ -159,14 +170,14 @@ def open_long(symbol, strategy, price, sl_price, tp_price=None):
     try:
         balance  = get_balance()
         raw_qty  = calc_quantity(price, sl_price, balance)
-        qty      = float(client.amount_to_precision(symbol, raw_qty))
         min_qty  = get_min_amount(symbol)
-        if min_qty and qty < min_qty:
-            qty = min_qty
+        if min_qty and raw_qty < min_qty:
+            raw_qty = min_qty
+        qty      = float(client.amount_to_precision(symbol, raw_qty))
         if qty <= 0:
             log.error(f"Hibas pozicio meret [{symbol}/{strategy}]!")
             return False
-        client.create_order(symbol, 'market', 'buy', qty, params={'tdMode': 'cross'})
+        client.create_order(symbol, 'market', 'buy', qty)
         with locks[symbol][strategy]:
             p = positions[symbol][strategy]
             p['active']      = True
@@ -190,14 +201,14 @@ def open_short(symbol, strategy, price, sl_price, tp_price=None):
     try:
         balance  = get_balance()
         raw_qty  = calc_quantity(price, sl_price, balance)
-        qty      = float(client.amount_to_precision(symbol, raw_qty))
         min_qty  = get_min_amount(symbol)
-        if min_qty and qty < min_qty:
-            qty = min_qty
+        if min_qty and raw_qty < min_qty:
+            raw_qty = min_qty
+        qty      = float(client.amount_to_precision(symbol, raw_qty))
         if qty <= 0:
             log.error(f"Hibas pozicio meret [{symbol}/{strategy}]!")
             return False
-        client.create_order(symbol, 'market', 'sell', qty, params={'tdMode': 'cross'})
+        client.create_order(symbol, 'market', 'sell', qty)
         with locks[symbol][strategy]:
             p = positions[symbol][strategy]
             p['active']      = True
@@ -229,8 +240,7 @@ def close_position(symbol, strategy, reason=""):
         side          = p['side']
     try:
         side_str = 'sell' if side == 'long' else 'buy'
-        client.create_order(symbol, 'market', side_str, qty,
-                             params={'tdMode': 'cross', 'reduceOnly': True})
+        client.create_order(symbol, 'market', side_str, qty, params={'reduceOnly': True})
     except Exception as e:
         log.error(f"Zaras API hiba [{symbol}]: {e}")
         with lock:
@@ -360,7 +370,7 @@ def webhook():
 
     raw_sym = data.get('symbol', 'BTCUSDT').upper().replace('/', '').replace('-', '')
     base    = raw_sym.replace('USDT', '').replace('USDC', '')
-    symbol  = f"{base}/USDC:USDC"
+    symbol  = f"{base}/USD:USD"
     if symbol not in SYMBOLS:
         log.warning(f"Ismeretlen symbol: {symbol}")
         return jsonify({'error': f'Ismeretlen symbol: {symbol}'}), 400
