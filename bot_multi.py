@@ -267,9 +267,33 @@ def update_trailing(symbol, strategy):
         candles             = positions[symbol][strategy]['candles']
 
     if candles >= MAX_CANDLES:
-        log.info(f"[{symbol}/{strategy}] {MAX_CANDLES} gyertya timeout - zaras")
-        close_position(symbol, strategy, f"{MAX_CANDLES} gyertya timeout")
-        return
+        p = positions[symbol][strategy]
+        price = get_price(symbol)
+        tp = p.get('tp')
+        entry = p.get('price_entry', price)
+        direction = p.get('direction', 'long')
+        near_tp = False
+        if tp and entry and tp != entry:
+            if direction == 'long':
+                progress = (price - entry) / (tp - entry) if tp > entry else 0
+            else:
+                progress = (entry - price) / (entry - tp) if entry > tp else 0
+            near_tp = progress >= 0.70
+        if near_tp:
+            log.info(f"[{symbol}/{strategy}] TP kozel ({progress*100:.0f}%) - trailing 0.5% aktivalva, timeout kihagyva")
+            with locks[symbol][strategy]:
+                if direction == 'long':
+                    new_trail = price * (1 - 0.005)
+                    if new_trail > p['trail_sl']:
+                        p['trail_sl'] = new_trail
+                else:
+                    new_trail = price * (1 + 0.005)
+                    if new_trail < p['trail_sl'] or p['trail_sl'] == 0:
+                        p['trail_sl'] = new_trail
+        else:
+            log.info(f"[{symbol}/{strategy}] {MAX_CANDLES} gyertya timeout - zaras")
+            close_position(symbol, strategy, f"{MAX_CANDLES} gyertya timeout")
+            return
 
     should_close  = False
     close_reason  = ""
